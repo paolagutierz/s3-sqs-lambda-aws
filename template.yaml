@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Image resizing service through SQS
+
+Parameters:
+  SourceS3Name:
+    Type: String
+  SourceQueueName:
+    Type: String
+  DestinationS3Name:
+    Type: String
+  DestinationQueueName:
+    Type: String
+
+Resources:
+  ## S3 bucket
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - ResizerQueueQueuePolicy
+    Properties:
+      BucketName: "SourceS3Name"
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Queue: !GetAtt ResizerQueue.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: '.jpg'
+
+  DestinationBucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - QueueDestinationPolicy
+    Properties:
+      BucketName: "DestinationS3Name"
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Queue: !GetAtt NotificationQueue.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: '.jpg'
+
+  ##SQS Destination Queue
+  NotificationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: "DestinationQueueName"
+
+  ##SQS Destination Queue Policies
+  QueueDestinationPolicy:
+    Type: "AWS::SQS::QueuePolicy"
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Id: NotificatioQueuePolicy
+        Statement:
+          - Sid: Allow-SendMessage-To-Queue-From-S3-Event-Notification-From-Destination
+            Effect: Allow
+            Principal:
+              Service: "s3.amazonaws.com"
+            Action:
+              - "sqs:SendMessage"
+            Resource: !GetAtt NotificationQueue.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Join [ "",[ 'arn:aws:s3:::',"DestinationS3Name" ] ]
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Queues:
+        - Ref: NotificationQueue
+
+
+
+  ## SQS Queue
+  ResizerQueue:
+    Type: "AWS::SQS::Queue"
+    Properties:
+      QueueName: "SourceQueueName"
+
+  ## Policies
+  ResizerQueueQueuePolicy:
+    Type: "AWS::SQS::QueuePolicy"
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Id: QueuePolicy
+        Statement:
+          - Sid: Allow-SendMessage-To-Queue-From-S3-Event-Notification
+            Effect: Allow
+            Principal:
+              Service: "s3.amazonaws.com"
+            Action:
+              - "sqs:SendMessage"
+            Resource: !GetAtt ResizerQueue.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Join ["",[ 'arn:aws:s3:::',"SourceS3Name" ]]
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Queues:
+        - Ref: ResizerQueue
+
+  ## Lambda function
+  ResizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.handler
+      Runtime: nodejs12.x
+      MemorySize: 2048
+      Layers:
+        - !Sub 'arn:aws:lambda:${AWS::Region}:175033217214:layer:graphicsmagick:2'
+      Policies:
+        - S3ReadPolicy:
+            BucketName: "SourceS3Name"
+        - S3CrudPolicy:
+            BucketName: "DestinationS3Name"
+      Environment:
+        Variables:
+          DESTINATION_BUCKETNAME: "DestinationS3Name"
+      Events:
+        MySQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ResizerQueue.Arn
+
+Outputs:
+  SourceBucketName:
+    Value: "SourceS3Name"
+    Description: S3 Bucket for object storage
+  DestinationBucketName:
+    Value: "DestinationS3Name"
+    Description: S3 destination Bucket for object storage
+  QueueName:
+    Value: "SourceQueueName"
+    Description: SQS Queue for queuing the s3 events
+  QueueDestinationName:
+    Value: "DestinationQueueName"
+    Description: SQS Queue for queuing the destination s3 events
+  FunctionArn:
+    Value: !Ref ResizerFunction
+    Description: ResizerFunction function  Arn
